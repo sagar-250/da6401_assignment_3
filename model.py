@@ -1,23 +1,19 @@
 """
-model.py — Transformer Architecture Skeleton
+model.py — Transformer Architecture
 DA6401 Assignment 3: "Attention Is All You Need"
 
 AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  scaled_dot_product_attention(Q, K, V, mask) → (out, weights)  │
-  │  MultiHeadAttention.forward(q, k, v, mask)   → Tensor          │
-  │  PositionalEncoding.forward(x)               → Tensor          │
-  │  make_src_mask(src, pad_idx)                 → BoolTensor      │
-  │  make_tgt_mask(tgt, pad_idx)                 → BoolTensor      │
-  │  Transformer.encode(src, src_mask)           → Tensor          │
-  │  Transformer.decode(memory,src_m,tgt,tgt_m)  → Tensor          │
-  └─────────────────────────────────────────────────────────────────┘
+  scaled_dot_product_attention(Q, K, V, mask) -> (out, weights)
+  MultiHeadAttention.forward(q, k, v, mask)   -> Tensor
+  PositionalEncoding.forward(x)               -> Tensor
+  make_src_mask(src, pad_idx)                 -> BoolTensor
+  make_tgt_mask(tgt, pad_idx)                 -> BoolTensor
+  Transformer.encode(src, src_mask)           -> Tensor
+  Transformer.decode(memory,src_m,tgt,tgt_m)  -> Tensor
 """
 
 import math
 import copy
-import os
-import gdown
 from typing import Optional, Tuple
 
 import torch
@@ -26,9 +22,7 @@ import torch.nn.functional as F
 
 
 # ══════════════════════════════════════════════════════════════════════
-#   STANDALONE ATTENTION FUNCTION  
-#    Exposed at module level so the autograder can import and test it
-#    independently of MultiHeadAttention.
+# STANDALONE ATTENTION FUNCTION
 # ══════════════════════════════════════════════════════════════════════
 
 def scaled_dot_product_attention(
@@ -36,421 +30,411 @@ def scaled_dot_product_attention(
     K: torch.Tensor,
     V: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
+    use_scale: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute Scaled Dot-Product Attention.
-
-        Attention(Q, K, V) = softmax( Q·Kᵀ / √dₖ ) · V
-
-    Args:
-        Q    : Query tensor,  shape (..., seq_q, d_k)
-        K    : Key tensor,    shape (..., seq_k, d_k)
-        V    : Value tensor,  shape (..., seq_k, d_v)
-        mask : Optional Boolean mask, shape broadcastable to
-               (..., seq_q, seq_k).
-               Positions where mask is True are MASKED OUT
-               (set to -inf before softmax).
-
-    Returns:
-        output : Attended output,   shape (..., seq_q, d_v)
-        attn_w : Attention weights, shape (..., seq_q, seq_k)
-    """
-    raise NotImplementedError
-
-
-# ══════════════════════════════════════════════════════════════════════
-# ❷  MASK HELPERS 
-#    Exposed at module level so they can be tested independently and
-#    reused inside Transformer.forward.
-# ══════════════════════════════════════════════════════════════════════
-
-def make_src_mask(
-    src: torch.Tensor,
-    pad_idx: int = 1,
-) -> torch.Tensor:
-    """
-    Build a padding mask for the encoder (source sequence).
+    Attention(Q, K, V) = softmax( Q*K^T / sqrt(d_k) ) * V
 
     Args:
-        src     : Source token-index tensor, shape [batch, src_len]
-        pad_idx : Vocabulary index of the <pad> token (default 1)
+        Q         : (..., seq_q, d_k)
+        K         : (..., seq_k, d_k)
+        V         : (..., seq_k, d_v)
+        mask      : BoolTensor broadcastable to (..., seq_q, seq_k).
+                    True positions are masked out (-inf before softmax).
+        use_scale : If False, skip 1/sqrt(d_k) scaling (ablation §2.2).
 
     Returns:
-        Boolean mask, shape [batch, 1, 1, src_len]
-        True  → position is a PAD token (will be masked out)
-        False → real token
+        output : (..., seq_q, d_v)
+        attn_w : (..., seq_q, seq_k)
     """
-    raise NotImplementedError
+    d_k = Q.size(-1)
+    scores = torch.matmul(Q, K.transpose(-2, -1))
+    if use_scale:
+        scores = scores / math.sqrt(d_k)
+    if mask is not None:
+        scores = scores.masked_fill(mask, float('-inf'))
+    attn_w = F.softmax(scores, dim=-1)
+    attn_w = torch.nan_to_num(attn_w, nan=0.0)
+    output = torch.matmul(attn_w, V)
+    return output, attn_w
 
 
-def make_tgt_mask(
-    tgt: torch.Tensor,
-    pad_idx: int = 1,
-) -> torch.Tensor:
+def make_src_mask(src: torch.Tensor, pad_idx: int = 1) -> torch.Tensor:
     """
-    Build a combined padding + causal (look-ahead) mask for the decoder.
-
-    Args:
-        tgt     : Target token-index tensor, shape [batch, tgt_len]
-        pad_idx : Vocabulary index of the <pad> token (default 1)
-
-    Returns:
-        Boolean mask, shape [batch, 1, tgt_len, tgt_len]
-        True → position is masked out (PAD or future token)
+    Padding mask for encoder.
+    Returns: BoolTensor [batch, 1, 1, src_len]  True=PAD (masked out)
     """
-    raise NotImplementedError
+    return (src == pad_idx).unsqueeze(1).unsqueeze(2)
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  MULTI-HEAD ATTENTION 
-# ══════════════════════════════════════════════════════════════════════
+def make_tgt_mask(tgt: torch.Tensor, pad_idx: int = 1) -> torch.Tensor:
+    """
+    Combined padding + causal mask for decoder.
+    Returns: BoolTensor [batch, 1, tgt_len, tgt_len]  True=masked out
+    """
+    batch_size, tgt_len = tgt.size()
+    device = tgt.device
+    # Upper-triangular (future positions)
+    causal = torch.triu(
+        torch.ones(tgt_len, tgt_len, device=device, dtype=torch.bool), diagonal=1
+    )
+    # Padding mask broadcast along seq_q
+    pad_mask = (tgt == pad_idx).unsqueeze(1).unsqueeze(2)
+    return causal.unsqueeze(0).unsqueeze(0) | pad_mask
 
 class MultiHeadAttention(nn.Module):
     """
-    Multi-Head Attention as in "Attention Is All You Need", §3.2.2.
-
-        MultiHead(Q,K,V) = Concat(head_1,...,head_h) · W_O
-        head_i = Attention(Q·W_Qi, K·W_Ki, V·W_Vi)
-
-    You are NOT allowed to use torch.nn.MultiheadAttention.
+    Multi-Head Attention (§3.2.2). Does NOT use torch.nn.MultiheadAttention.
 
     Args:
-        d_model   (int)  : Total model dimensionality. Must be divisible by num_heads.
-        num_heads (int)  : Number of parallel attention heads h.
-        dropout   (float): Dropout probability applied to attention weights.
+        d_model   : Total model dim (must be divisible by num_heads).
+        num_heads : Number of parallel attention heads.
+        dropout   : Dropout on attention weights.
+        use_scale : Whether to apply 1/sqrt(d_k) scaling.
     """
 
-    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1) -> None:
+    def __init__(self, d_model: int, num_heads: int,
+                 dropout: float = 0.1, use_scale: bool = True) -> None:
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
-
         self.d_model   = d_model
         self.num_heads = num_heads
-        self.d_k       = d_model // num_heads   # depth per head
-        raise NotImplementedError
-    
-    def forward(
-        self,
-        query: torch.Tensor,
-        key:   torch.Tensor,
-        value: torch.Tensor,
-        mask:  Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        self.d_k       = d_model // num_heads
+        self.use_scale = use_scale
+
+        self.qw = nn.Linear(d_model, d_model, bias=False)
+        self.kw = nn.Linear(d_model, d_model, bias=False)
+        self.vw = nn.Linear(d_model, d_model, bias=False)
+        self.ow = nn.Linear(d_model, d_model, bias=False)
+        self.dropout = nn.Dropout(p=dropout)
+
+        # Stored for attention visualization (§2.3)
+        self.attn_weights: Optional[torch.Tensor] = None
+
+    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, S, D) -> (B, h, S, d_k)"""
+        B, S, _ = x.size()
+        return x.view(B, S, self.num_heads, self.d_k).transpose(1, 2)
+
+    def forward(self, query: torch.Tensor, key: torch.Tensor,
+                value: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Args:
-            query : shape [batch, seq_q, d_model]
-            key   : shape [batch, seq_k, d_model]
-            value : shape [batch, seq_k, d_model]
-            mask  : Optional BoolTensor broadcastable to
-                    [batch, num_heads, seq_q, seq_k]
-                    True → masked out (attend nowhere)
-
+            query : [B, seq_q, d_model]
+            key   : [B, seq_k, d_model]
+            value : [B, seq_k, d_model]
+            mask  : BoolTensor broadcastable to [B, h, seq_q, seq_k]
         Returns:
-            output : shape [batch, seq_q, d_model]
-
+            output : [B, seq_q, d_model]
         """
-        raise NotImplementedError
+        B = query.size(0)
+        Q = self._split_heads(self.qw(query))
+        K = self._split_heads(self.kw(key))
+        V = self._split_heads(self.vw(value))
 
+        attn_out, attn_w = scaled_dot_product_attention(Q, K, V, mask, self.use_scale)
+        self.attn_weights = attn_w.detach()
 
-# ══════════════════════════════════════════════════════════════════════
-#   POSITIONAL ENCODING  
-# ══════════════════════════════════════════════════════════════════════
+        attn_out = self.dropout(attn_out)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, -1, self.d_model)
+        return self.ow(attn_out)
+
 
 class PositionalEncoding(nn.Module):
     """
-    Sinusoidal Positional Encoding as in "Attention Is All You Need", §3.5.
+    Sinusoidal Positional Encoding (§3.5). Supports 'sinusoidal' and 'learned' modes.
 
     Args:
-        d_model  (int)  : Embedding dimensionality.
-        dropout  (float): Dropout applied after adding encodings.
-        max_len  (int)  : Maximum sequence length to pre-compute (default 5000).
+        d_model : Embedding dimensionality.
+        dropout : Dropout after adding encodings.
+        max_len : Maximum sequence length (default 5000).
+        mode    : 'sinusoidal' (fixed, buffer) or 'learned' (nn.Embedding).
     """
 
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
+    def __init__(self, d_model: int, dropout: float = 0.1,
+                 max_len: int = 5000, mode: str = "sinusoidal") -> None:
         super().__init__()
-        raise NotImplementedError
+        self.mode    = mode
+        self.dropout = nn.Dropout(p=dropout)
+
+        if mode == "sinusoidal":
+            pe = torch.zeros(max_len, d_model)
+            position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+            div_term = torch.exp(
+                torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model)
+            )
+            pe[:, 0::2] = torch.sin(position * div_term)
+            pe[:, 1::2] = torch.cos(position * div_term)
+            pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+            self.register_buffer('pe', pe)
+        elif mode == "learned":
+            self.pe_embed = nn.Embedding(max_len, d_model)
+            self.max_len  = max_len
+        else:
+            raise ValueError(f"Unknown PE mode: {mode!r}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Args:
-            x : Input embeddings, shape [batch, seq_len, d_model]
-
-        Returns:
-            Tensor of same shape [batch, seq_len, d_model]
-            = x  +  PE[:, :seq_len, :]  
-
+        Args:  x : [batch, seq_len, d_model]
+        Returns:   [batch, seq_len, d_model]  (x + positional encoding)
         """
-        raise NotImplementedError
+        seq_len = x.size(1)
+        if self.mode == "sinusoidal":
+            x = x + self.pe[:, :seq_len, :]
+        else:
+            pos = torch.arange(seq_len, device=x.device).unsqueeze(0)
+            x = x + self.pe_embed(pos)
+        return self.dropout(x)
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  FEED-FORWARD NETWORK 
-# ══════════════════════════════════════════════════════════════════════
 
 class PositionwiseFeedForward(nn.Module):
-    """
-    Position-wise Feed-Forward Network, §3.3:
-
-        FFN(x) = max(0, x·W₁ + b₁)·W₂ + b₂
-
-    Args:
-        d_model (int)  : Input / output dimensionality (e.g. 512).
-        d_ff    (int)  : Inner-layer dimensionality (e.g. 2048).
-        dropout (float): Dropout applied between the two linears.
-    """
+    """FFN(x) = max(0, xW1+b1)W2+b2  (§3.3)"""
 
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1) -> None:
         super().__init__()
-        # TODO: Task 2.3 — define:
-        #   self.linear1 = nn.Linear(d_model, d_ff)
-        #   self.linear2 = nn.Linear(d_ff, d_model)
-        #   self.dropout = nn.Dropout(p=dropout)
-        raise NotImplementedError
+        self.l1 = nn.Linear(d_model, d_ff)
+        self.l2 = nn.Linear(d_ff, d_model)
+        self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x : shape [batch, seq_len, d_model]
-        Returns:
-              shape [batch, seq_len, d_model]
-        
-        """
-        raise NotImplementedError
+        return self.l2(self.dropout(F.relu(self.l1(x))))
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  ENCODER LAYER  
-# ══════════════════════════════════════════════════════════════════════
 
 class EncoderLayer(nn.Module):
     """
-    Single Transformer encoder sub-layer:
-        x → [Self-Attention → Add & Norm] → [FFN → Add & Norm]
-
-    Args:
-        d_model   (int)  : Model dimensionality.
-        num_heads (int)  : Number of attention heads.
-        d_ff      (int)  : FFN inner dimensionality.
-        dropout   (float): Dropout probability.
+    Single encoder layer: Self-Attn -> Add&Norm -> FFN -> Add&Norm.
+    Uses Post-LayerNorm (as in the original paper §3.1).
     """
 
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
+    def __init__(self, d_model: int, num_heads: int, d_ff: int,
+                 dropout: float = 0.1, use_scale: bool = True) -> None:
         super().__init__()
-        # TODO:instantiate:
-        raise NotImplementedError
+        self.s_attn = MultiHeadAttention(d_model, num_heads, dropout, use_scale)
+        self.ff       = PositionwiseFeedForward(d_model, d_ff, dropout)
+        self.n1     = nn.LayerNorm(d_model)
+        self.n2     = nn.LayerNorm(d_model)
+        self.dropout   = nn.Dropout(p=dropout)
 
     def forward(self, x: torch.Tensor, src_mask: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x        : shape [batch, src_len, d_model]
-            src_mask : shape [batch, 1, 1, src_len]
+        """x:[B,S,D], src_mask:[B,1,1,S] -> [B,S,D]"""
+        x = self.n1(x + self.dropout(self.s_attn(x, x, x, src_mask)))
+        x = self.n2(x + self.dropout(self.ff(x)))
+        return x
 
-        Returns:
-            shape [batch, src_len, d_model]
-
-        """
-        raise NotImplementedError
-
-
-# ══════════════════════════════════════════════════════════════════════
-#   DECODER LAYER 
-# ══════════════════════════════════════════════════════════════════════
 
 class DecoderLayer(nn.Module):
     """
-    Single Transformer decoder sub-layer:
-        x → [Masked Self-Attn → Add & Norm]
-          → [Cross-Attn(memory) → Add & Norm]
-          → [FFN → Add & Norm]
-
-    Args:
-        d_model   (int)  : Model dimensionality.
-        num_heads (int)  : Number of attention heads.
-        d_ff      (int)  : FFN inner dimensionality.
-        dropout   (float): Dropout probability.
+    Single decoder layer:
+      Masked Self-Attn -> Add&Norm -> Cross-Attn -> Add&Norm -> FFN -> Add&Norm.
     """
 
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
+    def __init__(self, d_model: int, num_heads: int, d_ff: int,
+                 dropout: float = 0.1, use_scale: bool = True) -> None:
         super().__init__()
-        # TODO: instantiate:
-        raise NotImplementedError
+        self.s_attn  = MultiHeadAttention(d_model, num_heads, dropout, use_scale)
+        self.c_attn = MultiHeadAttention(d_model, num_heads, dropout, use_scale)
+        self.ff        = PositionwiseFeedForward(d_model, d_ff, dropout)
+        self.n1      = nn.LayerNorm(d_model)
+        self.n2      = nn.LayerNorm(d_model)
+        self.n3      = nn.LayerNorm(d_model)
+        self.dropout    = nn.Dropout(p=dropout)
 
-    def forward(
-        self,
-        x:        torch.Tensor,
-        memory:   torch.Tensor,
-        src_mask: torch.Tensor,
-        tgt_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, memory: torch.Tensor,
+                src_mask: torch.Tensor, tgt_mask: torch.Tensor) -> torch.Tensor:
         """
-        Args:
-            x        : shape [batch, tgt_len, d_model]
-            memory   : Encoder output, shape [batch, src_len, d_model]
-            src_mask : shape [batch, 1, 1, src_len]
-            tgt_mask : shape [batch, 1, tgt_len, tgt_len]
-
-        Returns:
-            shape [batch, tgt_len, d_model]
+        x:[B,T,D], memory:[B,S,D], src_mask:[B,1,1,S], tgt_mask:[B,1,T,T] -> [B,T,D]
         """
-        raise NotImplementedError
+        x = self.n1(x + self.dropout(self.s_attn(x, x, x, tgt_mask)))
+        x = self.n2(x + self.dropout(self.c_attn(x, memory, memory, src_mask)))
+        x = self.n3(x + self.dropout(self.ff(x)))
+        return x
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  ENCODER & DECODER STACKS
-# ══════════════════════════════════════════════════════════════════════
 
 class Encoder(nn.Module):
-    """Stack of N identical EncoderLayer modules with final LayerNorm."""
+    """Stack of N encoder layers + final LayerNorm."""
 
     def __init__(self, layer: EncoderLayer, N: int) -> None:
         super().__init__()
-        raise NotImplementedError
+        self.lyrs = nn.ModuleList([copy.deepcopy(layer) for _ in range(N)])
+        self.n   = nn.LayerNorm(layer.s_attn.d_model)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x    : shape [batch, src_len, d_model]
-            mask : shape [batch, 1, 1, src_len]
-        Returns:
-            shape [batch, src_len, d_model]
-        """
-        raise NotImplementedError
+        for layer in self.lyrs:
+            x = layer(x, mask)
+        return self.n(x)
 
 
 class Decoder(nn.Module):
-    """Stack of N identical DecoderLayer modules with final LayerNorm."""
+    """Stack of N decoder layers + final LayerNorm."""
 
     def __init__(self, layer: DecoderLayer, N: int) -> None:
         super().__init__()
-        raise NotImplementedError
+        self.lyrs = nn.ModuleList([copy.deepcopy(layer) for _ in range(N)])
+        self.n   = nn.LayerNorm(layer.s_attn.d_model)
 
-    def forward(
-        self,
-        x:        torch.Tensor,
-        memory:   torch.Tensor,
-        src_mask: torch.Tensor,
-        tgt_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Args:
-            x        : shape [batch, tgt_len, d_model]
-            memory   : shape [batch, src_len, d_model]
-            src_mask : shape [batch, 1, 1, src_len]
-            tgt_mask : shape [batch, 1, tgt_len, tgt_len]
-        Returns:
-            shape [batch, tgt_len, d_model]
-        """
-        raise NotImplementedError
+    def forward(self, x: torch.Tensor, memory: torch.Tensor,
+                src_mask: torch.Tensor, tgt_mask: torch.Tensor) -> torch.Tensor:
+        for layer in self.lyrs:
+            x = layer(x, memory, src_mask, tgt_mask)
+        return self.n(x)
 
-
-# ══════════════════════════════════════════════════════════════════════
-#   FULL TRANSFORMER  
-# ══════════════════════════════════════════════════════════════════════
 
 class Transformer(nn.Module):
     """
     Full Encoder-Decoder Transformer for sequence-to-sequence tasks.
 
     Args:
-        src_vocab_size (int)  : Source vocabulary size.
-        tgt_vocab_size (int)  : Target vocabulary size.
-        d_model        (int)  : Model dimensionality (default 512).
-        N              (int)  : Number of encoder/decoder layers (default 6).
-        num_heads      (int)  : Number of attention heads (default 8).
-        d_ff           (int)  : FFN inner dimensionality (default 2048).
-        dropout        (float): Dropout probability (default 0.1).
+        src_vocab_size : Source vocabulary size.
+        tgt_vocab_size : Target vocabulary size.
+        d_model        : Model dimensionality (default 512).
+        N              : Number of encoder/decoder layers (default 6).
+        num_heads      : Number of attention heads (default 8).
+        d_ff           : FFN inner dimensionality (default 2048).
+        dropout        : Dropout probability (default 0.1).
+        pe_mode        : Positional encoding: 'sinusoidal' or 'learned'.
+        use_attn_scale : Whether to scale attention by 1/sqrt(d_k).
     """
 
     def __init__(
         self,
-        src_vocab_size: int,
-        tgt_vocab_size: int,
-        d_model:   int   = 512,
-        N:         int   = 6,
-        num_heads: int   = 8,
-        d_ff:      int   = 2048,
-        dropout:   float = 0.1,
-        checkpoint_path: str = None,
+        src_vocab_size: int = 18669,
+        tgt_vocab_size: int = 9797,
+        d_model:        int   = 256,
+        N:              int   = 4,
+        num_heads:      int   = 8,
+        d_ff:           int   = 1024,
+        dropout:        float = 0.2,
+        pe_mode:        str   = "sinusoidal",
+        use_attn_scale: bool  = True,
     ) -> None:
         super().__init__()
-        # TODO: Instantiate 
-        # init should also load the model weights if checkpoint path provided, download the .pth file like this
-        if checkpoint_path is not None:
-            gdown.download(id="<.pth drive id>", output=checkpoint_path, quiet=False)
-        raise NotImplementedError
 
-    # ── AUTOGRADER HOOKS ── keep these signatures exactly ─────────────
+        self.s_emb = nn.Embedding(src_vocab_size, d_model)
+        self.t_emb = nn.Embedding(tgt_vocab_size, d_model)
+        self.s_pe    = PositionalEncoding(d_model, dropout, mode=pe_mode)
+        self.t_pe    = PositionalEncoding(d_model, dropout, mode=pe_mode)
 
-    def encode(
-        self,
-        src:      torch.Tensor,
-        src_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        enc_layer    = EncoderLayer(d_model, num_heads, d_ff, dropout, use_attn_scale)
+        dec_layer    = DecoderLayer(d_model, num_heads, d_ff, dropout, use_attn_scale)
+        self.enc = Encoder(enc_layer, N)
+        self.dec = Decoder(dec_layer, N)
+
+        self.proj = nn.Linear(d_model, tgt_vocab_size)
+
+        # Stored for checkpoint saving
+        self.model_config = dict(
+            src_vocab_size=src_vocab_size, tgt_vocab_size=tgt_vocab_size,
+            d_model=d_model, N=N, num_heads=num_heads, d_ff=d_ff,
+            dropout=dropout, pe_mode=pe_mode, use_attn_scale=use_attn_scale,
+        )
+
+        self._init_weights()
+        
+        # Load vocab, tokenizer and weights inside init as per requirements
+        import os
+        import gdown
+        import spacy
+        
+        drive_link = "https://drive.google.com/uc?id=1RV5dhxxDZVJDOBDXcwWqcyUraUVaqbwY"
+        ckpt_path = "best_model.pt"
+        if not os.path.exists(ckpt_path):
+            gdown.download(drive_link, ckpt_path, quiet=False)
+            
+        print("Loading spacy models and vocabs...")
+        import spacy.cli
+        try:
+            self.de_nlp = spacy.load("de_core_news_sm")
+        except OSError:
+            spacy.cli.download("de_core_news_sm")
+            self.de_nlp = spacy.load("de_core_news_sm")
+            
+        try:
+            self.en_nlp = spacy.load("en_core_web_sm")
+        except OSError:
+            spacy.cli.download("en_core_web_sm")
+            self.en_nlp = spacy.load("en_core_web_sm")
+        
+        if os.path.exists('src_vocab.pt') and os.path.exists('tgt_vocab.pt'):
+            self.src_vocab = torch.load('src_vocab.pt', map_location='cpu', weights_only=False)
+            self.tgt_vocab = torch.load('tgt_vocab.pt', map_location='cpu', weights_only=False)
+        else:
+            # Fallback if somehow files are not present
+            from dataset import build_vocabs
+            self.src_vocab, self.tgt_vocab = build_vocabs(self.de_nlp, self.en_nlp)
+        
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        self.load_state_dict(ckpt['model_state_dict'])
+
+    def _init_weights(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    # ── AUTOGRADER HOOKS ──────────────────────────────────────────────
+
+    def encode(self, src: torch.Tensor, src_mask: torch.Tensor) -> torch.Tensor:
         """
         Run the full encoder stack.
-
-        Args:
-            src      : Token indices, shape [batch, src_len]
-            src_mask : shape [batch, 1, 1, src_len]
-
-        Returns:
-            memory : Encoder output, shape [batch, src_len, d_model]
+        src:[B,src_len] src_mask:[B,1,1,src_len] -> memory:[B,src_len,d_model]
         """
-    
-        raise NotImplementedError
+        d = self.s_emb.embedding_dim
+        src_emb = self.s_pe(self.s_emb(src) * math.sqrt(d))
+        return self.enc(src_emb, src_mask)
 
-    def decode(
-        self,
-        memory:   torch.Tensor,
-        src_mask: torch.Tensor,
-        tgt:      torch.Tensor,
-        tgt_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    def decode(self, memory: torch.Tensor, src_mask: torch.Tensor,
+               tgt: torch.Tensor, tgt_mask: torch.Tensor) -> torch.Tensor:
         """
-        Run the full decoder stack and project to vocabulary logits.
-
-        Args:
-            memory   : Encoder output,  shape [batch, src_len, d_model]
-            src_mask : shape [batch, 1, 1, src_len]
-            tgt      : Token indices,   shape [batch, tgt_len]
-            tgt_mask : shape [batch, 1, tgt_len, tgt_len]
-
-        Returns:
-            logits : shape [batch, tgt_len, tgt_vocab_size]
+        Run the full decoder stack and project to vocab logits.
+        Returns logits: [B, tgt_len, tgt_vocab_size]
         """
-        raise NotImplementedError
+        d = self.t_emb.embedding_dim
+        tgt_emb = self.t_pe(self.t_emb(tgt) * math.sqrt(d))
+        dec_out  = self.dec(tgt_emb, memory, src_mask, tgt_mask)
+        return self.proj(dec_out)
 
-    def forward(
-        self,
-        src:      torch.Tensor,
-        tgt:      torch.Tensor,
-        src_mask: torch.Tensor,
-        tgt_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, src: torch.Tensor, tgt: torch.Tensor,
+                src_mask: torch.Tensor, tgt_mask: torch.Tensor) -> torch.Tensor:
         """
         Full encoder-decoder forward pass.
-
-        Args:
-            src      : shape [batch, src_len]
-            tgt      : shape [batch, tgt_len]
-            src_mask : shape [batch, 1, 1, src_len]
-            tgt_mask : shape [batch, 1, tgt_len, tgt_len]
-
-        Returns:
-            logits : shape [batch, tgt_len, tgt_vocab_size]
+        Returns logits: [B, tgt_len, tgt_vocab_size]
         """
-        raise NotImplementedError
-
-
-    def infer(self, src_sentence: str) -> str:
-        """
-        Translates a German sentence to English using greedy autoregressive decoding.
+        memory = self.encode(src, src_mask)
+        return self.decode(memory, src_mask, tgt, tgt_mask)
         
-        Args:
-            src_sentence: The raw German text.
-            
-            
-        Returns:
-            The fully translated English string, detokenized and clean.
+    def infer(self, german_sentence: str, max_len: int = 100) -> str:
         """
-        raise NotImplementedError
+        End-to-end inference for a single German sentence.
+        Steps: Tokenize -> Encode -> Autoregressive Decode -> Detokenize.
+        """
+        from config import SOS_IDX, EOS_IDX
+        self.eval()
+        device = next(self.parameters()).device
+        
+        # Tokenize and numericalize source
+        de_tokens = [tok.text.lower() for tok in self.de_nlp.tokenizer(german_sentence)]
+        src_ids = [SOS_IDX] + self.src_vocab.encode(de_tokens) + [EOS_IDX]
+        src_tensor = torch.tensor(src_ids, dtype=torch.long, device=device).unsqueeze(0) # [1, src_len]
+        src_mask = make_src_mask(src_tensor)
+        
+        # Encode
+        with torch.no_grad():
+            memory = self.encode(src_tensor, src_mask)
+            
+            # Autoregressive decode
+            tgt_ids = [SOS_IDX]
+            for i in range(max_len):
+                tgt_tensor = torch.tensor(tgt_ids, dtype=torch.long, device=device).unsqueeze(0)
+                tgt_mask = make_tgt_mask(tgt_tensor)
+                
+                logits = self.decode(memory, src_mask, tgt_tensor, tgt_mask)
+                next_token_id = logits[0, -1].argmax().item()
+                tgt_ids.append(next_token_id)
+                
+                if next_token_id == EOS_IDX:
+                    break
+        
+  
+        tgt_tokens = [self.tgt_vocab.lookup_token(idx) for idx in tgt_ids[1:] if idx not in (SOS_IDX, EOS_IDX)]
+        return " ".join(tgt_tokens)
+
