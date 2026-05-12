@@ -274,9 +274,9 @@ class Transformer(nn.Module):
         import os
         import gdown
         import spacy
-        
-        drive_link = ""##
-        print("Model link removed to prevent copying from public repo, please inform if its needed")
+        drive_link = "https://drive.google.com/uc?id=1fB_aPN39P-zph1dNmu3SdFI4b_UxFsMB"
+        # drive_link = ""
+        # print("Model link removed to prevent copying from public repo, please inform if its needed")
         ckpt_path = "best_model.pt"
         if not os.path.exists(ckpt_path):
             gdown.download(drive_link, ckpt_path, quiet=False)
