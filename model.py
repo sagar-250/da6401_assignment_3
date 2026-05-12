@@ -21,10 +21,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ══════════════════════════════════════════════════════════════════════
-# STANDALONE ATTENTION FUNCTION
-# ══════════════════════════════════════════════════════════════════════
-
 def scaled_dot_product_attention(
     Q: torch.Tensor,
     K: torch.Tensor,
@@ -32,22 +28,7 @@ def scaled_dot_product_attention(
     mask: Optional[torch.Tensor] = None,
     use_scale: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compute Scaled Dot-Product Attention.
-    Attention(Q, K, V) = softmax( Q*K^T / sqrt(d_k) ) * V
-
-    Args:
-        Q         : (..., seq_q, d_k)
-        K         : (..., seq_k, d_k)
-        V         : (..., seq_k, d_v)
-        mask      : BoolTensor broadcastable to (..., seq_q, seq_k).
-                    True positions are masked out (-inf before softmax).
-        use_scale : If False, skip 1/sqrt(d_k) scaling (ablation §2.2).
-
-    Returns:
-        output : (..., seq_q, d_v)
-        attn_w : (..., seq_q, seq_k)
-    """
+  
     d_k = Q.size(-1)
     scores = torch.matmul(Q, K.transpose(-2, -1))
     if use_scale:
@@ -61,18 +42,10 @@ def scaled_dot_product_attention(
 
 
 def make_src_mask(src: torch.Tensor, pad_idx: int = 1) -> torch.Tensor:
-    """
-    Padding mask for encoder.
-    Returns: BoolTensor [batch, 1, 1, src_len]  True=PAD (masked out)
-    """
     return (src == pad_idx).unsqueeze(1).unsqueeze(2)
 
 
 def make_tgt_mask(tgt: torch.Tensor, pad_idx: int = 1) -> torch.Tensor:
-    """
-    Combined padding + causal mask for decoder.
-    Returns: BoolTensor [batch, 1, tgt_len, tgt_len]  True=masked out
-    """
     batch_size, tgt_len = tgt.size()
     device = tgt.device
     # Upper-triangular (future positions)
@@ -119,15 +92,7 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, query: torch.Tensor, key: torch.Tensor,
                 value: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Args:
-            query : [B, seq_q, d_model]
-            key   : [B, seq_k, d_model]
-            value : [B, seq_k, d_model]
-            mask  : BoolTensor broadcastable to [B, h, seq_q, seq_k]
-        Returns:
-            output : [B, seq_q, d_model]
-        """
+
         B = query.size(0)
         Q = self._split_heads(self.qw(query))
         K = self._split_heads(self.kw(key))
@@ -142,15 +107,7 @@ class MultiHeadAttention(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    """
-    Sinusoidal Positional Encoding (§3.5). Supports 'sinusoidal' and 'learned' modes.
 
-    Args:
-        d_model : Embedding dimensionality.
-        dropout : Dropout after adding encodings.
-        max_len : Maximum sequence length (default 5000).
-        mode    : 'sinusoidal' (fixed, buffer) or 'learned' (nn.Embedding).
-    """
 
     def __init__(self, d_model: int, dropout: float = 0.1,
                  max_len: int = 5000, mode: str = "sinusoidal") -> None:
@@ -189,7 +146,7 @@ class PositionalEncoding(nn.Module):
 
 
 class PositionwiseFeedForward(nn.Module):
-    """FFN(x) = max(0, xW1+b1)W2+b2  (§3.3)"""
+
 
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1) -> None:
         super().__init__()
@@ -202,10 +159,7 @@ class PositionwiseFeedForward(nn.Module):
 
 
 class EncoderLayer(nn.Module):
-    """
-    Single encoder layer: Self-Attn -> Add&Norm -> FFN -> Add&Norm.
-    Uses Post-LayerNorm (as in the original paper §3.1).
-    """
+
 
     def __init__(self, d_model: int, num_heads: int, d_ff: int,
                  dropout: float = 0.1, use_scale: bool = True) -> None:
@@ -252,7 +206,7 @@ class DecoderLayer(nn.Module):
 
 
 class Encoder(nn.Module):
-    """Stack of N encoder layers + final LayerNorm."""
+
 
     def __init__(self, layer: EncoderLayer, N: int) -> None:
         super().__init__()
@@ -266,7 +220,6 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    """Stack of N decoder layers + final LayerNorm."""
 
     def __init__(self, layer: DecoderLayer, N: int) -> None:
         super().__init__()
@@ -281,20 +234,6 @@ class Decoder(nn.Module):
 
 
 class Transformer(nn.Module):
-    """
-    Full Encoder-Decoder Transformer for sequence-to-sequence tasks.
-
-    Args:
-        src_vocab_size : Source vocabulary size.
-        tgt_vocab_size : Target vocabulary size.
-        d_model        : Model dimensionality (default 512).
-        N              : Number of encoder/decoder layers (default 6).
-        num_heads      : Number of attention heads (default 8).
-        d_ff           : FFN inner dimensionality (default 2048).
-        dropout        : Dropout probability (default 0.1).
-        pe_mode        : Positional encoding: 'sinusoidal' or 'learned'.
-        use_attn_scale : Whether to scale attention by 1/sqrt(d_k).
-    """
 
     def __init__(
         self,
@@ -404,10 +343,7 @@ class Transformer(nn.Module):
         return self.decode(memory, src_mask, tgt, tgt_mask)
         
     def infer(self, german_sentence: str, max_len: int = 100) -> str:
-        """
-        End-to-end inference for a single German sentence.
-        Steps: Tokenize -> Encode -> Autoregressive Decode -> Detokenize.
-        """
+
         from config import SOS_IDX, EOS_IDX
         self.eval()
         device = next(self.parameters()).device
