@@ -270,17 +270,15 @@ class Transformer(nn.Module):
 
         self._init_weights()
         
-        # --- WEIGHT TYING ---
-        self.proj.weight = self.t_emb.weight
-        
         # Load vocab, tokenizer and weights inside init as per requirements
         import os
         import gdown
         import spacy
-        drive_link = "https://drive.google.com/uc?id=1XDdjAYNBUHFXisneOBwXRPobJAFWnqdV"
+        drive_link = ""
+        # drive_link = ""
+        print("Model link removed to prevent copying from public repo, please inform if its needed")
         ckpt_path = "best_model.pt"
         if not os.path.exists(ckpt_path):
-            print(f"Downloading model from {drive_link}...")
             gdown.download(drive_link, ckpt_path, quiet=False)
             
         print("Loading spacy models and vocabs...")
@@ -305,10 +303,8 @@ class Transformer(nn.Module):
             from dataset import build_vocabs
             self.src_vocab, self.tgt_vocab = build_vocabs(self.de_nlp, self.en_nlp)
         
-        if os.path.exists(ckpt_path):
-           print(f"Loading weights from {ckpt_path}...")
-           ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
-           self.load_state_dict(ckpt['model_state_dict'])
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        self.load_state_dict(ckpt['model_state_dict'])
 
     def _init_weights(self):
         for p in self.parameters():
@@ -347,10 +343,8 @@ class Transformer(nn.Module):
         return self.decode(memory, src_mask, tgt, tgt_mask)
         
     def infer(self, german_sentence: str, max_len: int = 100) -> str:
-        """
-        Inference with greedy decoding.
-        """
-        from config import SOS_IDX, EOS_IDX, PAD_IDX
+
+        from config import SOS_IDX, EOS_IDX
         self.eval()
         device = next(self.parameters()).device
         
@@ -358,16 +352,17 @@ class Transformer(nn.Module):
         de_tokens = [tok.text.lower() for tok in self.de_nlp.tokenizer(german_sentence)]
         src_ids = [SOS_IDX] + self.src_vocab.encode(de_tokens) + [EOS_IDX]
         src_tensor = torch.tensor(src_ids, dtype=torch.long, device=device).unsqueeze(0) # [1, src_len]
-        src_mask = make_src_mask(src_tensor, PAD_IDX)
+        src_mask = make_src_mask(src_tensor)
         
-        # Optimized greedy inference
+        # Encode
         with torch.no_grad():
             memory = self.encode(src_tensor, src_mask)
             
+            # Autoregressive decode
             tgt_ids = [SOS_IDX]
             for i in range(max_len):
                 tgt_tensor = torch.tensor(tgt_ids, dtype=torch.long, device=device).unsqueeze(0)
-                tgt_mask = make_tgt_mask(tgt_tensor, PAD_IDX)
+                tgt_mask = make_tgt_mask(tgt_tensor)
                 
                 logits = self.decode(memory, src_mask, tgt_tensor, tgt_mask)
                 next_token_id = logits[0, -1].argmax().item()
@@ -376,5 +371,7 @@ class Transformer(nn.Module):
                 if next_token_id == EOS_IDX:
                     break
         
-        tgt_tokens = [self.tgt_vocab.lookup_token(idx) for idx in tgt_ids if idx not in (SOS_IDX, EOS_IDX, PAD_IDX)]
+  
+        tgt_tokens = [self.tgt_vocab.lookup_token(idx) for idx in tgt_ids[1:] if idx not in (SOS_IDX, EOS_IDX)]
         return " ".join(tgt_tokens)
+
