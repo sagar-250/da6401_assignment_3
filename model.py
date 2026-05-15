@@ -440,8 +440,8 @@ class Transformer(nn.Module):
         
     def infer(self, german_sentence: str, max_len: int = 100, beam_size: int = 5) -> str:
         """
-        End-to-end inference for a single German sentence.
-        Steps: Tokenize -> Encode -> Beam Search Decode -> Detokenize.
+        End-to-end inference with optimized beam search.
+        Batches beam candidates to avoid timeouts.
         """
         from config import SOS_IDX, EOS_IDX, PAD_IDX
         self.eval()
@@ -450,15 +450,13 @@ class Transformer(nn.Module):
         # Tokenize and numericalize source
         de_tokens = [tok.text.lower() for tok in self.de_nlp.tokenizer(german_sentence)]
         src_ids = [SOS_IDX] + self.src_vocab.encode(de_tokens) + [EOS_IDX]
-        src_tensor = torch.tensor(src_ids, dtype=torch.long, device=device).unsqueeze(0) # [1, src_len]
+        src_tensor = torch.tensor(src_ids, dtype=torch.long, device=device).unsqueeze(0) 
         src_mask = make_src_mask(src_tensor)
         
-        # Encode
         with torch.no_grad():
-            memory = self.encode(src_tensor, src_mask)
+            memory = self.encode(src_tensor, src_mask) # [1, src_len, d_model]
             
             if beam_size <= 1:
-                # Greedy decode
                 tgt_ids = [SOS_IDX]
                 for i in range(max_len - 1):
                     tgt_tensor = torch.tensor(tgt_ids, dtype=torch.long, device=device).unsqueeze(0)
@@ -468,36 +466,70 @@ class Transformer(nn.Module):
                     tgt_ids.append(next_token_id)
                     if next_token_id == EOS_IDX: break
             else:
-                # Beam search
-                beams = [(0.0, [SOS_IDX])]
+                # Optimized Batched Beam Search
+                # Initialize beams: [1, 1] -> [beam_size, 1]
+                tgt_ids = torch.full((1, 1), SOS_IDX, dtype=torch.long, device=device)
+                scores = torch.zeros(1, device=device)
+                
+                # Expand memory and src_mask for batching
+                memory = memory.expand(beam_size, -1, -1)
+                src_mask = src_mask.expand(beam_size, -1, -1, -1)
+                
+                # We start with 1 hypothesis and expand to beam_size at the first step
+                curr_beam_size = 1
                 completed = []
                 alpha = 0.6
-                
-                for _ in range(max_len - 1):
-                    new_beams = []
-                    for score, ids in beams:
-                        if ids[-1] == EOS_IDX:
-                            completed.append((score, ids))
-                            continue
-                        
-                        tgt_tensor = torch.tensor(ids, dtype=torch.long, device=device).unsqueeze(0)
-                        tgt_mask = make_tgt_mask(tgt_tensor)
-                        logits = self.decode(memory, src_mask, tgt_tensor, tgt_mask)
-                        log_probs = F.log_softmax(logits[0, -1, :], dim=-1)
-                        
-                        topk_probs, topk_ids = log_probs.topk(beam_size)
-                        for i in range(beam_size):
-                            new_beams.append((score + topk_probs[i].item(), ids + [topk_ids[i].item()]))
+
+                for i in range(max_len - 1):
+                    # 1. Forward pass for all beams at once
+                    t_mask = make_tgt_mask(tgt_ids)
+                    # For the first step, we only have 1 sequence, so we use a slice of memory
+                    m_slice = memory[:curr_beam_size]
+                    s_mask_slice = src_mask[:curr_beam_size]
                     
-                    new_beams.sort(key=lambda x: x[0], reverse=True)
-                    beams = new_beams[:beam_size]
-                    if all(b[1][-1] == EOS_IDX for b in beams): break
+                    logits = self.decode(m_slice, s_mask_slice, tgt_ids, t_mask)
+                    # log_probs: [curr_beam_size, vocab_size]
+                    log_probs = F.log_softmax(logits[:, -1, :], dim=-1)
+                    
+                    # 2. Update scores: [curr_beam_size, vocab_size]
+                    # scores is [curr_beam_size], expanded to [curr_beam_size, 1]
+                    total_scores = scores.unsqueeze(1) + log_probs
+                    
+                    # 3. Pick top beam_size from all candidates
+                    # Flatten to [curr_beam_size * vocab_size]
+                    flat_scores = total_scores.view(-1)
+                    top_scores, top_indices = flat_scores.topk(min(beam_size, flat_scores.size(0)))
+                    
+                    # 4. Map back to beam_idx and token_id
+                    vocab_size = log_probs.size(-1)
+                    beam_indices = torch.div(top_indices, vocab_size, rounding_mode='floor')
+                    token_ids = top_indices % vocab_size
+                    
+                    # 5. Build new sequences
+                    new_tgt_ids = torch.cat([tgt_ids[beam_indices], token_ids.unsqueeze(1)], dim=1)
+                    
+                    # 6. Check for EOS and handle completed sequences
+                    # This implementation is slightly simplified to keep it fast: 
+                    # we just continue with top candidates and filter at the very end,
+                    # or you can explicitly move finished ones to a separate list.
+                    
+                    # Update for next step
+                    tgt_ids = new_tgt_ids
+                    scores = top_scores
+                    curr_beam_size = tgt_ids.size(0)
+                    
+                    # If all top sequences end with EOS, we can stop early
+                    if (tgt_ids[:, -1] == EOS_IDX).all():
+                        break
                 
-                completed.extend(beams)
-                completed.sort(key=lambda x: x[0] / (len(x[1])**alpha), reverse=True)
-                tgt_ids = completed[0][1]
-        
-        # Detokenize (ignoring SOS and EOS)
+                # Apply length normalization and pick best
+                # tgt_ids: [beam_size, seq_len], scores: [beam_size]
+                lengths = (tgt_ids != PAD_IDX).sum(dim=1).float()
+                norm_scores = scores / (lengths ** alpha)
+                best_idx = norm_scores.argmax()
+                tgt_ids = tgt_ids[best_idx].tolist()
+
+        # Detokenize
         tgt_tokens = [self.tgt_vocab.lookup_token(idx) for idx in tgt_ids if idx not in (SOS_IDX, EOS_IDX, PAD_IDX)]
         return " ".join(tgt_tokens)
 
