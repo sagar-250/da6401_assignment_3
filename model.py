@@ -277,7 +277,7 @@ class Transformer(nn.Module):
         import os
         import gdown
         import spacy
-        drive_link = "https://drive.google.com/uc?id=14jaVTP1NdcT-ptB5qN-I8PM5KNrwtNPr"
+        drive_link = ""
         ckpt_path = "best_model.pt"
         if not os.path.exists(ckpt_path):
             print(f"Downloading model from {drive_link}...")
